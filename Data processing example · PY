@@ -1,0 +1,473 @@
+"""
+NHS Data Processing Module
+
+This module provides functions for loading, cleaning, and preprocessing
+NHS appointment data for analysis.
+
+Author: Venkat Potamsetti
+Date: November 2024
+"""
+
+import pandas as pd
+import numpy as np
+from typing import Dict, List, Tuple, Optional
+import warnings
+warnings.filterwarnings('ignore')
+
+
+class NHSDataLoader:
+    """
+    Class for loading and initial processing of NHS datasets
+    """
+    
+    def __init__(self, data_directory: str = 'data/raw/'):
+        """
+        Initialize the data loader
+        
+        Parameters:
+        -----------
+        data_directory : str
+            Path to directory containing raw data files
+        """
+        self.data_dir = data_directory
+        self.datasets = {}
+        
+    def load_all_datasets(self) -> Dict[str, pd.DataFrame]:
+        """
+        Load all NHS datasets
+        
+        Returns:
+        --------
+        dict : Dictionary containing all loaded datasets
+        """
+        try:
+            print("Loading NHS datasets...")
+            
+            # Load national categories
+            self.datasets['national'] = pd.read_csv(
+                f'{self.data_dir}/national_categories.csv'
+            )
+            print(f"✓ National categories: {len(self.datasets['national']):,} records")
+            
+            # Load regional appointments
+            self.datasets['regional'] = pd.read_csv(
+                f'{self.data_dir}/appointments_regional.csv'
+            )
+            print(f"✓ Regional appointments: {len(self.datasets['regional']):,} records")
+            
+            # Load actual duration
+            self.datasets['duration'] = pd.read_csv(
+                f'{self.data_dir}/actual_duration.csv'
+            )
+            print(f"✓ Actual duration: {len(self.datasets['duration']):,} records")
+            
+            # Load tweets (if exists)
+            try:
+                self.datasets['tweets'] = pd.read_excel(
+                    f'{self.data_dir}/tweets.xls'
+                )
+                print(f"✓ Tweets: {len(self.datasets['tweets']):,} records")
+            except FileNotFoundError:
+                print("⚠ Tweets data not found, skipping...")
+            
+            print(f"\n✓ Successfully loaded {len(self.datasets)} datasets")
+            return self.datasets
+            
+        except FileNotFoundError as e:
+            print(f"✗ Error: Data files not found in {self.data_dir}")
+            print(f"  Details: {e}")
+            return None
+        except Exception as e:
+            print(f"✗ Unexpected error loading data: {e}")
+            return None
+    
+    def get_dataset_info(self) -> Dict:
+        """
+        Get summary information about loaded datasets
+        
+        Returns:
+        --------
+        dict : Summary statistics for each dataset
+        """
+        if not self.datasets:
+            print("No datasets loaded. Run load_all_datasets() first.")
+            return None
+        
+        info = {}
+        for name, df in self.datasets.items():
+            info[name] = {
+                'rows': len(df),
+                'columns': len(df.columns),
+                'memory_usage_mb': df.memory_usage(deep=True).sum() / 1024**2,
+                'column_names': list(df.columns),
+                'missing_values': df.isnull().sum().sum()
+            }
+        
+        return info
+
+
+class NHSDataCleaner:
+    """
+    Class for cleaning and validating NHS appointment data
+    """
+    
+    def __init__(self, dataframe: pd.DataFrame):
+        """
+        Initialize with a dataframe to clean
+        
+        Parameters:
+        -----------
+        dataframe : pd.DataFrame
+            Raw NHS data to be cleaned
+        """
+        self.df = dataframe.copy()
+        self.cleaning_log = []
+        
+    def handle_missing_values(self, strategy: str = 'report') -> pd.DataFrame:
+        """
+        Handle missing values in the dataset
+        
+        Parameters:
+        -----------
+        strategy : str
+            Strategy for handling missing values: 'report', 'drop', or 'fill'
+            
+        Returns:
+        --------
+        pd.DataFrame : Cleaned dataframe
+        """
+        missing_summary = self.df.isnull().sum()
+        missing_cols = missing_summary[missing_summary > 0]
+        
+        if len(missing_cols) == 0:
+            self.cleaning_log.append("No missing values found")
+            return self.df
+        
+        self.cleaning_log.append(f"Missing values found in {len(missing_cols)} columns")
+        
+        if strategy == 'report':
+            print("\nMissing Values Report:")
+            print("-" * 50)
+            for col, count in missing_cols.items():
+                pct = (count / len(self.df)) * 100
+                print(f"{col}: {count} ({pct:.2f}%)")
+        
+        elif strategy == 'drop':
+            original_len = len(self.df)
+            self.df = self.df.dropna()
+            removed = original_len - len(self.df)
+            self.cleaning_log.append(f"Dropped {removed} rows with missing values")
+        
+        elif strategy == 'fill':
+            # Implement intelligent filling based on column type
+            for col in missing_cols.index:
+                if self.df[col].dtype in ['int64', 'float64']:
+                    self.df[col].fillna(self.df[col].median(), inplace=True)
+                else:
+                    self.df[col].fillna('Unknown', inplace=True)
+            self.cleaning_log.append("Filled missing values")
+        
+        return self.df
+    
+    def remove_duplicates(self, subset: Optional[List[str]] = None) -> pd.DataFrame:
+        """
+        Remove duplicate records
+        
+        Parameters:
+        -----------
+        subset : list, optional
+            List of columns to consider for duplicate detection
+            
+        Returns:
+        --------
+        pd.DataFrame : Cleaned dataframe
+        """
+        original_len = len(self.df)
+        self.df = self.df.drop_duplicates(subset=subset)
+        removed = original_len - len(self.df)
+        
+        if removed > 0:
+            self.cleaning_log.append(f"Removed {removed} duplicate records")
+        else:
+            self.cleaning_log.append("No duplicates found")
+        
+        return self.df
+    
+    def fix_data_types(self, date_columns: Optional[List[str]] = None) -> pd.DataFrame:
+        """
+        Fix data types for proper analysis
+        
+        Parameters:
+        -----------
+        date_columns : list, optional
+            List of column names that should be datetime
+            
+        Returns:
+        --------
+        pd.DataFrame : Cleaned dataframe
+        """
+        # Convert date columns
+        if date_columns:
+            for col in date_columns:
+                if col in self.df.columns:
+                    try:
+                        self.df[col] = pd.to_datetime(self.df[col])
+                        self.cleaning_log.append(f"Converted {col} to datetime")
+                    except Exception as e:
+                        self.cleaning_log.append(f"Failed to convert {col}: {e}")
+        
+        # Fix numeric columns that might be stored as objects
+        for col in self.df.columns:
+            if self.df[col].dtype == 'object':
+                # Try to convert to numeric
+                try:
+                    self.df[col] = pd.to_numeric(self.df[col], errors='ignore')
+                except:
+                    pass
+        
+        return self.df
+    
+    def validate_appointment_data(self) -> Dict:
+        """
+        Validate appointment-specific business rules
+        
+        Returns:
+        --------
+        dict : Validation results
+        """
+        validation_results = {
+            'total_records': len(self.df),
+            'issues': []
+        }
+        
+        # Check for negative appointment counts
+        if 'count_of_appointments' in self.df.columns:
+            negative_counts = (self.df['count_of_appointments'] < 0).sum()
+            if negative_counts > 0:
+                validation_results['issues'].append(
+                    f"Found {negative_counts} negative appointment counts"
+                )
+        
+        # Check date ranges
+        if 'appointment_month' in self.df.columns:
+            try:
+                dates = pd.to_datetime(self.df['appointment_month'])
+                future_dates = (dates > pd.Timestamp.now()).sum()
+                if future_dates > 0:
+                    validation_results['issues'].append(
+                        f"Found {future_dates} future appointment dates"
+                    )
+            except:
+                pass
+        
+        # Check categorical values
+        if 'appointment_status' in self.df.columns:
+            valid_statuses = ['Attended', 'DNA', 'Cancelled', 'Unknown', 'Booked']
+            invalid = ~self.df['appointment_status'].isin(valid_statuses)
+            if invalid.sum() > 0:
+                validation_results['issues'].append(
+                    f"Found {invalid.sum()} invalid appointment statuses"
+                )
+        
+        if len(validation_results['issues']) == 0:
+            validation_results['issues'].append("All validation checks passed")
+        
+        return validation_results
+    
+    def get_cleaning_summary(self) -> str:
+        """
+        Get summary of cleaning operations performed
+        
+        Returns:
+        --------
+        str : Summary of cleaning log
+        """
+        summary = "\nData Cleaning Summary:\n"
+        summary += "=" * 50 + "\n"
+        for i, entry in enumerate(self.cleaning_log, 1):
+            summary += f"{i}. {entry}\n"
+        return summary
+
+
+class FeatureEngineer:
+    """
+    Class for creating new features from NHS appointment data
+    """
+    
+    def __init__(self, dataframe: pd.DataFrame):
+        """
+        Initialize with a dataframe
+        
+        Parameters:
+        -----------
+        dataframe : pd.DataFrame
+            Cleaned NHS data
+        """
+        self.df = dataframe.copy()
+    
+    def add_temporal_features(self, date_column: str = 'appointment_month') -> pd.DataFrame:
+        """
+        Add temporal features (year, month, quarter, etc.)
+        
+        Parameters:
+        -----------
+        date_column : str
+            Name of the date column
+            
+        Returns:
+        --------
+        pd.DataFrame : Dataframe with new temporal features
+        """
+        if date_column not in self.df.columns:
+            print(f"Warning: {date_column} not found in dataframe")
+            return self.df
+        
+        # Ensure datetime format
+        self.df[date_column] = pd.to_datetime(self.df[date_column])
+        
+        # Extract temporal features
+        self.df['year'] = self.df[date_column].dt.year
+        self.df['month'] = self.df[date_column].dt.month
+        self.df['month_name'] = self.df[date_column].dt.month_name()
+        self.df['quarter'] = self.df[date_column].dt.quarter
+        self.df['week_of_year'] = self.df[date_column].dt.isocalendar().week
+        self.df['day_of_week'] = self.df[date_column].dt.dayofweek
+        self.df['is_weekend'] = self.df['day_of_week'].isin([5, 6])
+        
+        # Add season
+        self.df['season'] = self.df['month'].map({
+            12: 'Winter', 1: 'Winter', 2: 'Winter',
+            3: 'Spring', 4: 'Spring', 5: 'Spring',
+            6: 'Summer', 7: 'Summer', 8: 'Summer',
+            9: 'Autumn', 10: 'Autumn', 11: 'Autumn'
+        })
+        
+        return self.df
+    
+    def calculate_dna_rate(self, groupby_cols: Optional[List[str]] = None) -> pd.DataFrame:
+        """
+        Calculate Did Not Attend (DNA) rate
+        
+        Parameters:
+        -----------
+        groupby_cols : list, optional
+            Columns to group by for calculation
+            
+        Returns:
+        --------
+        pd.DataFrame : Dataframe with DNA rate calculated
+        """
+        if 'appointment_status' not in self.df.columns:
+            print("Warning: appointment_status column not found")
+            return self.df
+        
+        if groupby_cols:
+            # Calculate grouped DNA rate
+            total_appointments = self.df.groupby(groupby_cols).size()
+            dna_appointments = self.df[
+                self.df['appointment_status'] == 'DNA'
+            ].groupby(groupby_cols).size()
+            
+            dna_rate = (dna_appointments / total_appointments * 100).fillna(0)
+            
+            # Merge back to original dataframe
+            self.df = self.df.merge(
+                dna_rate.rename('dna_rate'),
+                left_on=groupby_cols,
+                right_index=True,
+                how='left'
+            )
+        else:
+            # Calculate overall DNA rate
+            total = len(self.df)
+            dna_count = (self.df['appointment_status'] == 'DNA').sum()
+            self.df['overall_dna_rate'] = (dna_count / total * 100)
+        
+        return self.df
+    
+    def create_appointment_categories(self) -> pd.DataFrame:
+        """
+        Create high-level appointment categories
+        
+        Returns:
+        --------
+        pd.DataFrame : Dataframe with new categorical features
+        """
+        # Categorize appointment modes
+        if 'appointment_mode' in self.df.columns:
+            mode_mapping = {
+                'Face-to-Face': 'In-Person',
+                'Telephone': 'Remote',
+                'Video': 'Remote',
+                'Online': 'Remote',
+                'Home Visit': 'In-Person'
+            }
+            self.df['appointment_category'] = self.df['appointment_mode'].map(
+                lambda x: mode_mapping.get(x, 'Other')
+            )
+        
+        # Categorize time between booking and appointment
+        if 'time_between_book_and_appointment' in self.df.columns:
+            self.df['booking_urgency'] = pd.cut(
+                self.df['time_between_book_and_appointment'],
+                bins=[-1, 0, 7, 30, float('inf')],
+                labels=['Same Day', 'Within Week', 'Within Month', 'Advance']
+            )
+        
+        return self.df
+
+
+# Example usage
+if __name__ == "__main__":
+    # Load data
+    loader = NHSDataLoader('data/raw/')
+    datasets = loader.load_all_datasets()
+    
+    if datasets:
+        # Get dataset info
+        info = loader.get_dataset_info()
+        print("\nDataset Information:")
+        for name, details in info.items():
+            print(f"\n{name.upper()}:")
+            print(f"  Rows: {details['rows']:,}")
+            print(f"  Columns: {details['columns']}")
+            print(f"  Memory: {details['memory_usage_mb']:.2f} MB")
+        
+        # Clean regional data
+        print("\n" + "="*60)
+        print("Cleaning regional appointments data...")
+        print("="*60)
+        
+        cleaner = NHSDataCleaner(datasets['regional'])
+        
+        # Remove duplicates
+        cleaned_data = cleaner.remove_duplicates()
+        
+        # Handle missing values
+        cleaned_data = cleaner.handle_missing_values(strategy='report')
+        
+        # Fix data types
+        cleaned_data = cleaner.fix_data_types(
+            date_columns=['appointment_month']
+        )
+        
+        # Validate
+        validation = cleaner.validate_appointment_data()
+        print("\nValidation Results:")
+        for issue in validation['issues']:
+            print(f"  • {issue}")
+        
+        # Print cleaning summary
+        print(cleaner.get_cleaning_summary())
+        
+        # Feature engineering
+        print("\n" + "="*60)
+        print("Engineering features...")
+        print("="*60)
+        
+        engineer = FeatureEngineer(cleaned_data)
+        enhanced_data = engineer.add_temporal_features('appointment_month')
+        enhanced_data = engineer.create_appointment_categories()
+        
+        print(f"\n✓ Added {len(enhanced_data.columns) - len(cleaned_data.columns)} new features")
+        print(f"  New columns: {list(set(enhanced_data.columns) - set(cleaned_data.columns))}")
